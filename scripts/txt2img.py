@@ -1,20 +1,34 @@
-import argparse, os, sys, glob
-import torch
-import numpy as np
-from omegaconf import OmegaConf
-from PIL import Image
-from tqdm import tqdm, trange
-from itertools import islice
-from einops import rearrange
-from torchvision.utils import make_grid
+import argparse
+import os
 import time
+from contextlib import nullcontext
+from itertools import islice
+
+import numpy as np
+import torch
+from PIL import Image
+from einops import rearrange
+from omegaconf import OmegaConf
 from pytorch_lightning import seed_everything
 from torch import autocast
-from contextlib import contextmanager, nullcontext
+from torchvision.utils import make_grid
+from tqdm import tqdm, trange
 
-from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
+from ldm.util import instantiate_from_config
+
+
+def get_device():
+    if torch.cuda.is_available():
+        return 'cuda'
+#   elif torch.backends.mps.is_available():
+#        return 'mps'
+    else:
+        return 'cpu'
+
+
+device = torch.device(get_device())
 
 
 def chunk(it, size):
@@ -37,7 +51,7 @@ def load_model_from_config(config, ckpt, verbose=False):
         print("unexpected keys:")
         print(u)
 
-    model.cuda()
+    model.to(get_device())
     model.eval()
     return model
 
@@ -72,7 +86,7 @@ def main():
     parser.add_argument(
         "--ddim_steps",
         type=int,
-        default=50,
+        default=70,
         help="number of ddim sampling steps",
     )
     parser.add_argument(
@@ -99,7 +113,7 @@ def main():
     parser.add_argument(
         "--n_iter",
         type=int,
-        default=2,
+        default=70,
         help="sample this often",
     )
     parser.add_argument(
@@ -129,7 +143,7 @@ def main():
     parser.add_argument(
         "--n_samples",
         type=int,
-        default=3,
+        default=1,
         help="how many samples to produce for each given prompt. A.k.a. batch size",
     )
     parser.add_argument(
@@ -172,7 +186,7 @@ def main():
         type=str,
         help="evaluate at this precision",
         choices=["full", "autocast"],
-        default="autocast"
+        default="full"
     )
     opt = parser.parse_args()
 
@@ -187,7 +201,6 @@ def main():
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
 
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
 
     if opt.plms:
@@ -220,13 +233,16 @@ def main():
     if opt.fixed_code:
         start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
 
-    precision_scope = autocast if opt.precision=="autocast" else nullcontext
+    if device.type in ['mps', 'cpu']:
+        precision_scope = nullcontext  # have to use f32 on mps
+    else:
+        precision_scope = autocast if opt.precision == "autocast" else nullcontext
     with torch.no_grad():
-        with precision_scope("cuda"):
+        with precision_scope(device.type):
             with model.ema_scope():
                 tic = time.time()
                 all_samples = list()
-                for n in trange(opt.n_iter, desc="Sampling"):
+                for _ in trange(opt.n_iter, desc="Sampling"):
                     for prompts in tqdm(data, desc="data"):
                         uc = None
                         if opt.scale != 1.0:
